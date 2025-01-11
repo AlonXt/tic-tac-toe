@@ -34,6 +34,7 @@ const GameBoard = () => {
           board: data.board,
           currentPlayer: data.current_player,
           isMyTurn: data.is_your_turn,
+          isGameOver: false,
           gameStatus: data.player_count === 2 
             ? (data.is_your_turn ? 'Your turn!' : "Opponent's turn!")
             : 'Waiting for opponent...'
