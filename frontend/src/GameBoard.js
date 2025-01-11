@@ -1,18 +1,29 @@
 import React, { useState, useEffect } from 'react';
-import Square from './Square';
+
+const Square = ({ value, onClick }) => (
+  <button 
+    className={`square ${value}`}
+    onClick={onClick}
+  >
+    {value}
+  </button>
+);
 
 const GameBoard = () => {
+  // Extract gameId from URL
+  const gameId = new URLSearchParams(window.location.search).get('id');
+  
   const [gameState, setGameState] = useState({
     board: Array(9).fill(''),
     currentPlayer: 'X',
     isMyTurn: false,
     isGameOver: false,
-    gameStatus: 'Waiting for opponent...'
+    gameStatus: 'Connecting to game...',
+    symbol: null
   });
   const [ws, setWs] = useState(null);
 
-  const handleWebSocketMessage = (event, mounted) => {
-    if (!mounted) return;
+  const handleWebSocketMessage = (event) => {
     console.log('Received message:', event.data);
     const data = JSON.parse(event.data);
     
@@ -23,22 +34,32 @@ const GameBoard = () => {
           board: data.board,
           currentPlayer: data.current_player,
           isMyTurn: data.is_your_turn,
-          gameStatus: data.is_your_turn ? 'Your turn!' : "Opponent's turn!",
-          isGameOver: false
+          gameStatus: data.player_count === 2 
+            ? (data.is_your_turn ? 'Your turn!' : "Opponent's turn!")
+            : 'Waiting for opponent...'
         }));
       },
       player_joined: () => {
         setGameState(prev => ({
           ...prev,
+          symbol: data.symbol,
           isMyTurn: data.is_your_turn,
-          gameStatus: `Game started! ${data.is_your_turn ? 'Your turn!' : "Opponent's turn!"}`
+          gameStatus: data.player_count === 2
+            ? `Game started! ${data.is_your_turn ? 'Your turn!' : "Opponent's turn!"}`
+            : 'Waiting for opponent...'
         }));
       },
       game_over: () => {
         setGameState(prev => ({
           ...prev,
           isGameOver: true,
-          gameStatus: data.winner ? `Game Over! ${data.winner}` : 'Game Over! Draw!'
+          gameStatus: `Game Over! ${data.winner}`
+        }));
+      },
+      opponent_disconnected: () => {
+        setGameState(prev => ({
+          ...prev,
+          gameStatus: 'Opponent disconnected. Waiting for them to rejoin...'
         }));
       }
     };
@@ -52,23 +73,25 @@ const GameBoard = () => {
   };
 
   useEffect(() => {
+    if (!gameId) {
+      setGameState(prev => ({
+        ...prev,
+        gameStatus: 'Invalid game ID. Please check your URL.'
+      }));
+      return;
+    }
+
     let websocket = null;
     let retryCount = 0;
     const maxRetries = 3;
-    let mounted = true;
 
     const connectWebSocket = () => {
-      if (!mounted) return;
       try {
         if (websocket?.readyState === WebSocket.OPEN) return;
 
-        websocket = new WebSocket('ws://localhost:8000/ws/game');
+        websocket = new WebSocket(`ws://localhost:8000/ws/game/${gameId}`);
         
         websocket.onopen = () => {
-          if (!mounted) {
-            websocket.close();
-            return;
-          }
           console.log('WebSocket connected successfully');
           setGameState(prev => ({
             ...prev,
@@ -77,10 +100,9 @@ const GameBoard = () => {
           setWs(websocket);
         };
         
-        websocket.onmessage = (event) => handleWebSocketMessage(event, mounted);
+        websocket.onmessage = handleWebSocketMessage;
         
         websocket.onerror = (error) => {
-          if (!mounted) return;
           console.error('WebSocket error:', error);
           setGameState(prev => ({
             ...prev,
@@ -88,17 +110,33 @@ const GameBoard = () => {
           }));
         };
         
-        websocket.onclose = () => {
-          if (!mounted) return;
-          console.log('WebSocket closed');
-          setGameState(prev => ({
-            ...prev,
-            gameStatus: 'Connection lost. Retrying...'
-          }));
+        websocket.onclose = (event) => {
+          console.log('WebSocket closed:', event.code, event.reason);
+          setWs(null);
+          
+          if (event.code === 4000) {
+            setGameState(prev => ({
+              ...prev,
+              gameStatus: 'Game not found.'
+            }));
+            return;
+          }
+          
+          if (event.code === 4001) {
+            setGameState(prev => ({
+              ...prev,
+              gameStatus: 'Game is full.'
+            }));
+            return;
+          }
           
           if (retryCount < maxRetries) {
             retryCount++;
             setTimeout(connectWebSocket, 2000);
+            setGameState(prev => ({
+              ...prev,
+              gameStatus: 'Connection lost. Retrying...'
+            }));
           } else {
             setGameState(prev => ({
               ...prev,
@@ -107,7 +145,6 @@ const GameBoard = () => {
           }
         };
       } catch (error) {
-        if (!mounted) return;
         console.error('WebSocket connection error:', error);
         setGameState(prev => ({
           ...prev,
@@ -119,12 +156,11 @@ const GameBoard = () => {
     connectWebSocket();
 
     return () => {
-      mounted = false;
       if (websocket) {
         websocket.close();
       }
     };
-  }, []);
+  }, [gameId]);
 
   const handleSquareClick = (index) => {
     const { isMyTurn, board, isGameOver } = gameState;
@@ -147,42 +183,71 @@ const GameBoard = () => {
     }
   };
 
-  const renderSquare = (index) => (
-    <Square
-      value={gameState.board[index]}
-      onClick={() => handleSquareClick(index)}
-    />
-  );
+  const createNewGame = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/games/create', {
+        method: 'POST',
+      });
+      const data = await response.json();
+      const gameUrl = `${window.location.origin}?id=${data.game_id}`;
+      
+      // Copy to clipboard
+      await navigator.clipboard.writeText(gameUrl);
+      alert('Game link copied to clipboard! Share it with your opponent.');
+      
+      // Redirect to the game
+      window.location.href = gameUrl;
+    } catch (error) {
+      console.error('Error creating game:', error);
+      alert('Failed to create game. Please try again.');
+    }
+  };
 
   const renderBoard = () => (
-    <table>
-      <tbody>
-        {[0, 3, 6].map(rowStart => (
-          <tr key={rowStart}>
-            {[0, 1, 2].map(colOffset => (
-              <td key={colOffset}>
-                {renderSquare(rowStart + colOffset)}
-              </td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="board-container">
+      <table>
+        <tbody>
+          {[0, 3, 6].map(rowStart => (
+            <tr key={rowStart}>
+              {[0, 1, 2].map(colOffset => (
+                <td key={colOffset}>
+                  <Square
+                    value={gameState.board[rowStart + colOffset]}
+                    onClick={() => handleSquareClick(rowStart + colOffset)}
+                  />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 
   return (
     <div className="game-container">
       <h2 className="game-status">{gameState.gameStatus}</h2>
-      <div className="game-board">
-        {renderBoard()}
-      </div>
-      {gameState.isGameOver && (
-        <button 
-          className="new-game-button" 
-          onClick={startNewGame}
+      
+      {!gameId ? (
+        <button
+          onClick={createNewGame}
+          className="new-game-button"
         >
-          Start New Game
+          Create New Game
         </button>
+      ) : (
+        <>
+          {renderBoard()}
+          
+          {gameState.isGameOver && (
+            <button 
+              onClick={startNewGame}
+              className="new-game-button"
+            >
+              Start New Game
+            </button>
+          )}
+        </>
       )}
     </div>
   );
